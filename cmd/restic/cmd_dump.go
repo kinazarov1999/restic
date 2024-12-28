@@ -95,7 +95,7 @@ func printFromTree(ctx context.Context, tree *restic.Tree, repo restic.BlobLoade
 		// first item it finds and dump that according to the switch case below.
 		if node.Name == pathComponents[0] {
 			switch {
-			case l == 1 && dump.IsFile(node):
+			case l == 1 && (dump.IsFile(node) || node.Type == "dev"):
 				return d.WriteNode(ctx, node)
 			case l > 1 && dump.IsDir(node):
 				subtree, err := restic.LoadTree(ctx, repo, *node.Subtree)

@@ -34,4 +34,5 @@ type File interface {
 	Readdir(int) ([]os.FileInfo, error)
 	Seek(int64, int) (int64, error)
 	Stat() (os.FileInfo, error)
+	ReadAt(b []byte, off int64) (n int, err error)
 }

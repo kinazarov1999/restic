@@ -325,7 +325,7 @@ func (arch *Archiver) saveDir(ctx context.Context, snPath string, dir string, fi
 		pathname := arch.FS.Join(dir, name)
 		oldNode := previous.Find(name)
 		snItem := join(snPath, name)
-		fn, excluded, err := arch.save(ctx, snItem, pathname, oldNode)
+		fn, excluded, err := arch.save(ctx, snItem, pathname, oldNode, false, 0, 0)
 
 		// return error early if possible
 		if err != nil {
@@ -387,6 +387,7 @@ func (fn *FutureNode) take(ctx context.Context) futureNodeResult {
 	}
 	select {
 	case res, ok := <-fn.ch:
+		debug.Log("<<<<<<<<Getting result from the channel...")
 		if ok {
 			// free channel
 			fn.ch = nil
@@ -417,7 +418,7 @@ func (arch *Archiver) allBlobsPresent(previous *restic.Node) bool {
 // Errors and completion needs to be handled by the caller.
 //
 // snPath is the path within the current snapshot.
-func (arch *Archiver) save(ctx context.Context, snPath, target string, previous *restic.Node) (fn FutureNode, excluded bool, err error) {
+func (arch *Archiver) save(ctx context.Context, snPath, target string, previous *restic.Node, readSpecial bool, workersCount int, blockSizeMB int) (fn FutureNode, excluded bool, err error) {
 	start := time.Now()
 
 	debug.Log("%v target %q, previous %v", snPath, target, previous)
@@ -432,8 +433,14 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 		return FutureNode{}, true, nil
 	}
 
-	// get file info and run remaining select functions that require file information
-	fi, err := arch.FS.Lstat(target)
+	var fi os.FileInfo
+	if !readSpecial {
+		// get file info and run remaining select functions that require file information
+		fi, err = arch.FS.Lstat(target)
+	} else {
+		fi, err = arch.FS.Stat(target)
+	}
+
 	if err != nil {
 		debug.Log("lstat() for %v returned error: %v", target, err)
 		err = arch.error(abstarget, err)
@@ -448,7 +455,7 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 	}
 
 	switch {
-	case fs.IsRegularFile(fi):
+	case fs.IsRegularFile(fi) || (readSpecial && fi.Mode()&os.ModeDevice != 0):
 		debug.Log("  %v regular file", target)
 
 		// check if the file has not changed before performing a fopen operation (more expensive, specially
@@ -485,7 +492,8 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 
 		// reopen file and do an fstat() on the open file to check it is still
 		// a file (and has not been exchanged for e.g. a symlink)
-		file, err := arch.FS.OpenFile(target, fs.O_RDONLY|fs.O_NOFOLLOW, 0)
+		//file, err := arch.FS.OpenFile(target, fs.O_RDONLY|fs.O_NOFOLLOW, 0)
+		file, err := arch.FS.OpenFile(target, fs.O_RDONLY, 0)
 		if err != nil {
 			debug.Log("Openfile() for %v returned error: %v", target, err)
 			err = arch.error(abstarget, err)
@@ -507,7 +515,7 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 		}
 
 		// make sure it's still a file
-		if !fs.IsRegularFile(fi) {
+		if !(fi.Mode().IsRegular() || (readSpecial && fi.Mode()&os.ModeDevice != 0)) {
 			err = errors.Errorf("file %v changed type, refusing to archive", fi.Name())
 			_ = file.Close()
 			err = arch.error(abstarget, err)
@@ -517,6 +525,7 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 			return FutureNode{}, true, nil
 		}
 
+		// TODO: readSpecial has nothing to do with parallelism
 		// Save will close the file, we don't need to do that
 		fn = arch.fileSaver.Save(ctx, snPath, target, file, fi, func() {
 			arch.StartFile(snPath)
@@ -524,7 +533,7 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 			arch.trackItem(snPath, nil, nil, ItemStats{}, 0)
 		}, func(node *restic.Node, stats ItemStats) {
 			arch.trackItem(snPath, previous, node, stats, time.Since(start))
-		})
+		}, readSpecial, workersCount, blockSizeMB)
 
 	case fi.IsDir():
 		debug.Log("  %v dir", target)
@@ -623,7 +632,7 @@ func (arch *Archiver) statDir(dir string) (os.FileInfo, error) {
 
 // saveTree stores a Tree in the repo, returned is the tree. snPath is the path
 // within the current snapshot.
-func (arch *Archiver) saveTree(ctx context.Context, snPath string, atree *Tree, previous *restic.Tree, complete CompleteFunc) (FutureNode, int, error) {
+func (arch *Archiver) saveTree(ctx context.Context, snPath string, atree *Tree, previous *restic.Tree, complete CompleteFunc, readSpecial bool, workersCount int, blockSizeMB int) (FutureNode, int, error) {
 
 	var node *restic.Node
 	if snPath != "/" {
@@ -663,7 +672,7 @@ func (arch *Archiver) saveTree(ctx context.Context, snPath string, atree *Tree, 
 
 		// this is a leaf node
 		if subatree.Leaf() {
-			fn, excluded, err := arch.save(ctx, join(snPath, name), subatree.Path, previous.Find(name))
+			fn, excluded, err := arch.save(ctx, join(snPath, name), subatree.Path, previous.Find(name), readSpecial, workersCount, blockSizeMB)
 
 			if err != nil {
 				err = arch.error(subatree.Path, err)
@@ -699,7 +708,7 @@ func (arch *Archiver) saveTree(ctx context.Context, snPath string, atree *Tree, 
 		// not a leaf node, archive subtree
 		fn, _, err := arch.saveTree(ctx, join(snPath, name), &subatree, oldSubtree, func(n *restic.Node, is ItemStats) {
 			arch.trackItem(snItem, oldNode, n, is, time.Since(start))
-		})
+		}, readSpecial, workersCount, blockSizeMB)
 		if err != nil {
 			return FutureNode{}, 0, err
 		}
@@ -756,6 +765,10 @@ type SnapshotOptions struct {
 	ProgramVersion string
 	// SkipIfUnchanged omits the snapshot creation if it is identical to the parent snapshot.
 	SkipIfUnchanged bool
+
+	ReadSpecial  bool
+	WorkersCount int
+	BlockSizeMB  int
 }
 
 // loadParentTree loads a tree referenced by snapshot id. If id is null, nil is returned.
@@ -831,7 +844,7 @@ func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts Snaps
 			debug.Log("starting snapshot")
 			fn, nodeCount, err := arch.saveTree(wgCtx, "/", atree, arch.loadParentTree(wgCtx, opts.ParentSnapshot), func(_ *restic.Node, is ItemStats) {
 				arch.trackItem("/", nil, nil, is, time.Since(start))
-			})
+			}, opts.ReadSpecial, opts.WorkersCount, opts.BlockSizeMB)
 			if err != nil {
 				return err
 			}
