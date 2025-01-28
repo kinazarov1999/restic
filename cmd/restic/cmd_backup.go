@@ -95,6 +95,11 @@ type BackupOptions struct {
 	ReadConcurrency   uint
 	NoScan            bool
 	SkipIfUnchanged   bool
+	CustomReader      bool
+
+	ReadSpecial  bool
+	WorkersCount int
+	BlockSizeMB  int
 }
 
 var backupOptions BackupOptions
@@ -144,6 +149,11 @@ func init() {
 		f.BoolVar(&backupOptions.ExcludeCloudFiles, "exclude-cloud-files", false, "excludes online-only cloud files (such as OneDrive Files On-Demand)")
 	}
 	f.BoolVar(&backupOptions.SkipIfUnchanged, "skip-if-unchanged", false, "skip snapshot creation if identical to parent snapshot")
+	f.BoolVar(&backupOptions.CustomReader, "custom-reader", false, "use custom reader")
+
+	f.BoolVar(&backupOptions.ReadSpecial, "read-special", false, "backup block devices")
+	f.IntVar(&backupOptions.WorkersCount, "workers-count", 0, "amount of workers for special backup")
+	f.IntVar(&backupOptions.BlockSizeMB, "block-size-mb", 0, "block size for special backup")
 
 	// parse read concurrency from env, on error the default value will be used
 	readConcurrency, _ := strconv.ParseUint(os.Getenv("RESTIC_READ_CONCURRENCY"), 10, 32)
@@ -575,7 +585,7 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts GlobalOptions, ter
 		targetFS = localVss
 	}
 
-	if opts.Stdin || opts.StdinCommand {
+	if opts.Stdin || opts.StdinCommand || opts.CustomReader {
 		if !gopts.JSON {
 			progressPrinter.V("read data from stdin")
 		}
@@ -585,6 +595,11 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts GlobalOptions, ter
 			source, err = fs.NewCommandReader(ctx, args, globalOptions.stderr)
 			if err != nil {
 				return err
+			}
+		}
+		if opts.CustomReader {
+			source = &fs.CustomReader{
+				Name: "hello",
 			}
 		}
 		targetFS = &fs.Reader{
@@ -663,6 +678,9 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts GlobalOptions, ter
 		ParentSnapshot:  parentSnapshot,
 		ProgramVersion:  "restic " + version,
 		SkipIfUnchanged: opts.SkipIfUnchanged,
+		ReadSpecial:     opts.ReadSpecial,
+		WorkersCount:    opts.WorkersCount,
+		BlockSizeMB:     opts.BlockSizeMB,
 	}
 
 	if !gopts.JSON {

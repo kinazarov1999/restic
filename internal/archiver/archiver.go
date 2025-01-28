@@ -333,7 +333,7 @@ func (arch *Archiver) saveDir(ctx context.Context, snPath string, dir string, me
 		pathname := arch.FS.Join(dir, name)
 		oldNode := previous.Find(name)
 		snItem := join(snPath, name)
-		fn, excluded, err := arch.save(ctx, snItem, pathname, oldNode)
+		fn, excluded, err := arch.save(ctx, snItem, pathname, oldNode, false, 0, 0)
 
 		// return error early if possible
 		if err != nil {
@@ -418,6 +418,7 @@ func (fn *futureNode) take(ctx context.Context) futureNodeResult {
 	}
 	select {
 	case res, ok := <-fn.ch:
+		debug.Log("<<<<<<<<Getting result from the channel...")
 		if ok {
 			// free channel
 			fn.ch = nil
@@ -448,7 +449,7 @@ func (arch *Archiver) allBlobsPresent(previous *restic.Node) bool {
 // Errors and completion needs to be handled by the caller.
 //
 // snPath is the path within the current snapshot.
-func (arch *Archiver) save(ctx context.Context, snPath, target string, previous *restic.Node) (fn futureNode, excluded bool, err error) {
+func (arch *Archiver) save(ctx context.Context, snPath, target string, previous *restic.Node, readSpecial bool, workersCount int, blockSizeMB int) (fn futureNode, excluded bool, err error) {
 	start := time.Now()
 
 	debug.Log("%v target %q, previous %v", snPath, target, previous)
@@ -476,6 +477,7 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 		return futureNode{}, true, nil
 	}
 
+	// TODO: follow?
 	meta, err := arch.FS.OpenFile(target, fs.O_NOFOLLOW, true)
 	if err != nil {
 		debug.Log("open metadata for %v returned error: %v", target, err)
@@ -505,7 +507,8 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 	}
 
 	switch {
-	case fi.Mode.IsRegular():
+	// TODO: IsDir is just a placeholder. Need something like IsBlockDevice
+	case fi.Mode.IsRegular() || (readSpecial && fi.Mode.IsDir()):
 		debug.Log("  %v regular file", target)
 
 		// check if the file has not changed before performing a fopen operation (more expensive, specially
@@ -555,6 +558,7 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 		}
 
 		// make sure it's still a file
+		// TODO: IsDevice
 		if !fi.Mode.IsRegular() {
 			err = errors.Errorf("file %q changed type, refusing to archive", target)
 			return filterError(err)
@@ -562,6 +566,7 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 
 		closeFile = false
 
+		// TODO: readSpecial has nothing to do with parallelism
 		// Save will close the file, we don't need to do that
 		fn = arch.fileSaver.Save(ctx, snPath, target, meta, func() {
 			arch.StartFile(snPath)
@@ -569,7 +574,7 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 			arch.trackItem(snPath, nil, nil, ItemStats{}, 0)
 		}, func(node *restic.Node, stats ItemStats) {
 			arch.trackItem(snPath, previous, node, stats, time.Since(start))
-		})
+		}, readSpecial, workersCount, blockSizeMB)
 
 	case fi.Mode.IsDir():
 		debug.Log("  %v dir", target)
@@ -651,7 +656,7 @@ func join(elem ...string) string {
 
 // saveTree stores a Tree in the repo, returned is the tree. snPath is the path
 // within the current snapshot.
-func (arch *Archiver) saveTree(ctx context.Context, snPath string, atree *tree, previous *restic.Tree, complete fileCompleteFunc) (futureNode, int, error) {
+func (arch *Archiver) saveTree(ctx context.Context, snPath string, atree *tree, previous *restic.Tree, complete fileCompleteFunc, readSpecial bool, workersCount int, blockSizeMB int) (futureNode, int, error) {
 
 	var node *restic.Node
 	if snPath != "/" {
@@ -684,7 +689,7 @@ func (arch *Archiver) saveTree(ctx context.Context, snPath string, atree *tree, 
 
 		// this is a leaf node
 		if subatree.Leaf() {
-			fn, excluded, err := arch.save(ctx, join(snPath, name), subatree.Path, previous.Find(name))
+			fn, excluded, err := arch.save(ctx, join(snPath, name), subatree.Path, previous.Find(name), readSpecial, workersCount, blockSizeMB)
 
 			if err != nil {
 				err = arch.error(subatree.Path, err)
@@ -720,7 +725,7 @@ func (arch *Archiver) saveTree(ctx context.Context, snPath string, atree *tree, 
 		// not a leaf node, archive subtree
 		fn, _, err := arch.saveTree(ctx, join(snPath, name), &subatree, oldSubtree, func(n *restic.Node, is ItemStats) {
 			arch.trackItem(snItem, oldNode, n, is, time.Since(start))
-		})
+		}, readSpecial, workersCount, blockSizeMB)
 		if err != nil {
 			return futureNode{}, 0, err
 		}
@@ -802,6 +807,10 @@ type SnapshotOptions struct {
 	ProgramVersion string
 	// SkipIfUnchanged omits the snapshot creation if it is identical to the parent snapshot.
 	SkipIfUnchanged bool
+
+	ReadSpecial  bool
+	WorkersCount int
+	BlockSizeMB  int
 }
 
 // loadParentTree loads a tree referenced by snapshot id. If id is null, nil is returned.
@@ -879,7 +888,7 @@ func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts Snaps
 			debug.Log("starting snapshot")
 			fn, nodeCount, err := arch.saveTree(wgCtx, "/", atree, arch.loadParentTree(wgCtx, opts.ParentSnapshot), func(_ *restic.Node, is ItemStats) {
 				arch.trackItem("/", nil, nil, is, time.Since(start))
-			})
+			}, opts.ReadSpecial, opts.WorkersCount, opts.BlockSizeMB)
 			if err != nil {
 				return err
 			}
