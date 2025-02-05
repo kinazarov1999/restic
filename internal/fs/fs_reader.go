@@ -112,6 +112,10 @@ func (fs *Reader) Lstat(name string) (*ExtendedFileInfo, error) {
 	return nil, pathError("lstat", name, os.ErrNotExist)
 }
 
+func (fs *Reader) Stat(name string) (*ExtendedFileInfo, error) {
+	return fs.Lstat(name)
+}
+
 // Join joins any number of path elements into a single path, adding a
 // Separator if necessary. Join calls Clean on the result; in particular, all
 // empty strings are ignored. On Windows, the result is a UNC path if and only
@@ -223,6 +227,10 @@ func (f fakeFile) Read(_ []byte) (int, error) {
 
 func (f fakeFile) ReadAt(_ []byte, _ int64) (n int, err error) {
 	return 0, pathError("readAt", f.name, os.ErrInvalid)
+}
+
+func (f fakeFile) Fd() uintptr {
+	return 0
 }
 
 func (f fakeFile) Close() error {

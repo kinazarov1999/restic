@@ -1,10 +1,8 @@
 package fs
 
 import (
-	"io"
-	"os"
-
 	"github.com/restic/restic/internal/restic"
+	"io"
 )
 
 // FS bundles all methods needed for a file system.
@@ -19,6 +17,7 @@ type FS interface {
 	// Only the O_NOFOLLOW and O_DIRECTORY flags are supported.
 	OpenFile(name string, flag int, metadataOnly bool) (File, error)
 	Lstat(name string) (*ExtendedFileInfo, error)
+	Stat(name string) (*ExtendedFileInfo, error)
 
 	Join(elem ...string) string
 	Separator() string
@@ -50,7 +49,6 @@ type File interface {
 	// must be consistent with that returned by Stat(). In particular, the metadata
 	// returned by consecutive calls to Stat() and ToNode() must match.
 	ToNode(ignoreXattrListError bool) (*restic.Node, error)
-	Readdir(int) ([]os.FileInfo, error)
-	Seek(int64, int) (int64, error)
 	ReadAt(b []byte, off int64) (n int, err error)
+	Fd() uintptr
 }
