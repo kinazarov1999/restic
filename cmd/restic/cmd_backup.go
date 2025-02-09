@@ -96,9 +96,8 @@ type BackupOptions struct {
 	NoScan            bool
 	SkipIfUnchanged   bool
 
-	ReadSpecial  bool
-	WorkersCount uint
-	BlockSizeMB  uint
+	ReadSpecial bool
+	BlockSizeMB uint
 }
 
 var backupOptions BackupOptions
@@ -149,9 +148,8 @@ func init() {
 	}
 	f.BoolVar(&backupOptions.SkipIfUnchanged, "skip-if-unchanged", false, "skip snapshot creation if identical to parent snapshot")
 
-	f.BoolVar(&backupOptions.ReadSpecial, "read-special", false, "backup block devices")
-	f.UintVar(&backupOptions.WorkersCount, "workers-count", 0, "amount of workers for special backup")
-	f.UintVar(&backupOptions.BlockSizeMB, "block-size-mb", 0, "block size for special backup")
+	f.BoolVar(&backupOptions.ReadSpecial, "read-special", false, "backup block devices and follow symlinks")
+	f.UintVar(&backupOptions.BlockSizeMB, "block-size-mb", 0, "per-file reading block size")
 
 	// parse read concurrency from env, on error the default value will be used
 	readConcurrency, _ := strconv.ParseUint(os.Getenv("RESTIC_READ_CONCURRENCY"), 10, 32)
@@ -636,13 +634,13 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts GlobalOptions, ter
 	}
 
 	arch := archiver.New(repo, targetFS, archiver.Options{
-		ReadConcurrency:        opts.ReadConcurrency,
-		PerFileReadConcurrency: opts.WorkersCount,
-		BlockSizeMB:            opts.BlockSizeMB,
+		ReadConcurrency: opts.ReadConcurrency,
+		BlockSizeMB:     opts.BlockSizeMB,
 	})
 	arch.SelectByName = selectByNameFilter
 	arch.Select = selectFilter
 	arch.WithAtime = opts.WithAtime
+	arch.ReadSpecial = opts.ReadSpecial
 	success := true
 	arch.Error = func(item string, err error) error {
 		success = false
@@ -676,7 +674,6 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts GlobalOptions, ter
 		ParentSnapshot:  parentSnapshot,
 		ProgramVersion:  "restic " + version,
 		SkipIfUnchanged: opts.SkipIfUnchanged,
-		ReadSpecial:     opts.ReadSpecial,
 	}
 
 	if !gopts.JSON {

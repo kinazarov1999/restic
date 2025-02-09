@@ -131,6 +131,9 @@ type Archiver struct {
 
 	// Flags controlling change detection. See doc/040_backup.rst for details.
 	ChangeIgnoreFlags uint
+
+	// Read block and char devices as well as symlinks
+	ReadSpecial bool
 }
 
 // Flags for the ChangeIgnoreFlags bitfield.
@@ -145,8 +148,6 @@ type Options struct {
 	// it's set to zero, at most two files are read in concurrently (which
 	// turned out to be a good default for most situations).
 	ReadConcurrency uint
-
-	PerFileReadConcurrency uint
 
 	BlockSizeMB uint
 
@@ -168,14 +169,6 @@ func (o Options) ApplyDefaults() Options {
 		// experiments documented here:
 		// https://github.com/borgbackup/borg/issues/3500
 		o.ReadConcurrency = 2
-	}
-
-	if o.PerFileReadConcurrency == 0 {
-		o.PerFileReadConcurrency = 1
-	}
-
-	if o.BlockSizeMB == 0 {
-		o.BlockSizeMB = 0
 	}
 
 	if o.SaveBlobConcurrency == 0 {
@@ -345,7 +338,7 @@ func (arch *Archiver) saveDir(ctx context.Context, snPath string, dir string, me
 		pathname := arch.FS.Join(dir, name)
 		oldNode := previous.Find(name)
 		snItem := join(snPath, name)
-		fn, excluded, err := arch.save(ctx, snItem, pathname, oldNode, false)
+		fn, excluded, err := arch.save(ctx, snItem, pathname, oldNode)
 
 		// return error early if possible
 		if err != nil {
@@ -461,7 +454,7 @@ func (arch *Archiver) allBlobsPresent(previous *restic.Node) bool {
 // Errors and completion needs to be handled by the caller.
 //
 // snPath is the path within the current snapshot.
-func (arch *Archiver) save(ctx context.Context, snPath, target string, previous *restic.Node, readSpecial bool) (fn futureNode, excluded bool, err error) {
+func (arch *Archiver) save(ctx context.Context, snPath, target string, previous *restic.Node) (fn futureNode, excluded bool, err error) {
 	start := time.Now()
 
 	debug.Log("%v target %q, previous %v", snPath, target, previous)
@@ -490,7 +483,7 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 	}
 
 	var openFlag int
-	if readSpecial {
+	if arch.ReadSpecial {
 		openFlag = 0
 	} else {
 		openFlag = fs.O_NOFOLLOW
@@ -528,7 +521,7 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 	}
 
 	switch {
-	case fi.Mode.IsRegular() || (readSpecial && (fi.Mode&os.ModeDevice != 0)):
+	case fi.Mode.IsRegular() || (arch.ReadSpecial && (fi.Mode&os.ModeDevice != 0)):
 		debug.Log("  %v regular file or device", target)
 
 		// check if the file has not changed before performing a fopen operation (more expensive, specially
@@ -578,7 +571,7 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 		}
 
 		// make sure it's still a file or a device
-		if !fi.Mode.IsRegular() && (!readSpecial || (fi.Mode&os.ModeDevice == 0)) {
+		if !fi.Mode.IsRegular() && (!arch.ReadSpecial || (fi.Mode&os.ModeDevice == 0)) {
 			err = errors.Errorf("file %q changed type, refusing to archive", target)
 			return filterError(err)
 		}
@@ -674,7 +667,7 @@ func join(elem ...string) string {
 
 // saveTree stores a Tree in the repo, returned is the tree. snPath is the path
 // within the current snapshot.
-func (arch *Archiver) saveTree(ctx context.Context, snPath string, atree *tree, previous *restic.Tree, complete fileCompleteFunc, readSpecial bool) (futureNode, int, error) {
+func (arch *Archiver) saveTree(ctx context.Context, snPath string, atree *tree, previous *restic.Tree, complete fileCompleteFunc) (futureNode, int, error) {
 
 	var node *restic.Node
 	if snPath != "/" {
@@ -707,7 +700,7 @@ func (arch *Archiver) saveTree(ctx context.Context, snPath string, atree *tree, 
 
 		// this is a leaf node
 		if subatree.Leaf() {
-			fn, excluded, err := arch.save(ctx, join(snPath, name), subatree.Path, previous.Find(name), readSpecial)
+			fn, excluded, err := arch.save(ctx, join(snPath, name), subatree.Path, previous.Find(name))
 
 			if err != nil {
 				err = arch.error(subatree.Path, err)
@@ -743,7 +736,7 @@ func (arch *Archiver) saveTree(ctx context.Context, snPath string, atree *tree, 
 		// not a leaf node, archive subtree
 		fn, _, err := arch.saveTree(ctx, join(snPath, name), &subatree, oldSubtree, func(n *restic.Node, is ItemStats) {
 			arch.trackItem(snItem, oldNode, n, is, time.Since(start))
-		}, readSpecial)
+		})
 		if err != nil {
 			return futureNode{}, 0, err
 		}
@@ -858,7 +851,7 @@ func (arch *Archiver) runWorkers(ctx context.Context, wg *errgroup.Group) {
 		arch.blobSaver.Save,
 		arch.Repo.Config().ChunkerPolynomial,
 		arch.Options.ReadConcurrency, arch.Options.SaveBlobConcurrency,
-		arch.Options.PerFileReadConcurrency, arch.Options.BlockSizeMB)
+		arch.Options.BlockSizeMB)
 	arch.fileSaver.CompleteBlob = arch.CompleteBlob
 	arch.fileSaver.NodeFromFileInfo = arch.nodeFromFileInfo
 
@@ -905,7 +898,7 @@ func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts Snaps
 			debug.Log("starting snapshot")
 			fn, nodeCount, err := arch.saveTree(wgCtx, "/", atree, arch.loadParentTree(wgCtx, opts.ParentSnapshot), func(_ *restic.Node, is ItemStats) {
 				arch.trackItem("/", nil, nil, is, time.Since(start))
-			}, opts.ReadSpecial)
+			})
 			if err != nil {
 				return err
 			}

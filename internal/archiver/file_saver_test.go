@@ -48,7 +48,7 @@ func startFileSaver(ctx context.Context, t testing.TB, fsInst fs.FS) (*fileSaver
 		t.Fatal(err)
 	}
 
-	s := newFileSaver(ctx, wg, saveBlob, pol, workers, workers)
+	s := newFileSaver(ctx, wg, saveBlob, pol, workers, workers, 0)
 	s.NodeFromFileInfo = func(snPath, filename string, meta ToNoder, ignoreXattrListError bool) (*restic.Node, error) {
 		return meta.ToNode(ignoreXattrListError)
 	}

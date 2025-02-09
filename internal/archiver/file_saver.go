@@ -38,12 +38,20 @@ type fileSaver struct {
 
 // newFileSaver returns a new file saver. A worker pool with fileWorkers is
 // started, it is stopped when ctx is cancelled.
-func newFileSaver(ctx context.Context, wg *errgroup.Group, save saveBlobFn, pol chunker.Pol, fileWorkers, blobWorkers, perFileWorkers uint, blockSizeMB uint) *fileSaver {
+func newFileSaver(ctx context.Context, wg *errgroup.Group, save saveBlobFn, pol chunker.Pol, fileWorkers, blobWorkers, blockSizeMB uint) *fileSaver {
 	ch := make(chan saveFileJob)
 
 	debug.Log("new file saver with %v file workers and %v blob workers", fileWorkers, blobWorkers)
 
 	poolSize := fileWorkers + blobWorkers
+
+	var perFileWorkers uint
+	if blockSizeMB == 0 {
+		perFileWorkers = 1
+	} else {
+		perFileWorkers = fileWorkers
+		fileWorkers = 1
+	}
 
 	s := &fileSaver{
 		saveBlob:     save,
@@ -184,7 +192,10 @@ func (s *fileSaver) saveFile(ctx context.Context, snPath string, target string, 
 		return
 	}
 
+	// reset node size, as we're going to calculate it
+	node.Size = 0
 	fnr.node = node
+	debug.Log("Node size: %d", fnr.node.Size)
 
 	if (node.Type != restic.NodeTypeFile) && (node.Type != restic.NodeTypeDev) && (node.Type != restic.NodeTypeCharDev) {
 		_ = f.Close()
@@ -265,6 +276,12 @@ func (s *fileSaver) saveFile(ctx context.Context, snPath string, target string, 
 		return
 	}
 
+	err = f.Close()
+	if err != nil {
+		completeError(err)
+		return
+	}
+
 	lock.Lock()
 	// require one additional completeFuture() call to ensure that the future only completes
 	// after reaching the end of this method
@@ -311,7 +328,6 @@ func (s *fileSaver) processBlobWorker(
 		} else {
 			debug.Log("Offset start: %d", job.offsetStart)
 			debug.Log("Offset end: %d", job.offsetEnd)
-			// pf = fs.NewPartialFile(f, job.offsetStart, job.offsetEnd)
 			pf = io.NewSectionReader(f, job.offsetStart, job.offsetEnd-job.offsetStart)
 		}
 		res, err := s.processBlobs(ctx, target, pf, lock, fnr, completeBlob, chnker, job.id, contentMap)
@@ -340,6 +356,7 @@ func (s *fileSaver) processBlobs(
 	size := uint64(0)
 	chnker.Reset(f, s.pol)
 	contentMap[id] = make([]restic.ID, 0)
+	debug.Log("Node size: %d", fnr.node.Size)
 
 	for {
 		buf := s.saveFilePool.Get()
@@ -356,6 +373,9 @@ func (s *fileSaver) processBlobs(
 		}
 
 		buf.Data = chunk.Data
+		debug.Log("Buffer data: %s", string(buf.Data))
+		debug.Log("Raw buffer data: %b", buf.Data)
+
 		size = uint64(chunk.Length)
 		debug.Log("Need to add size: %d", size)
 
@@ -370,6 +390,7 @@ func (s *fileSaver) processBlobs(
 		lock.Lock()
 		contentMap[id] = append(contentMap[id], restic.ID{})
 		fnr.node.Size += size
+		debug.Log("Node size: %d", fnr.node.Size)
 		lock.Unlock()
 		debug.Log("Scheduling to run saveBlob at %d", pos)
 
