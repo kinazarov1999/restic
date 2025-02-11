@@ -197,7 +197,7 @@ func (s *fileSaver) saveFile(ctx context.Context, snPath string, target string, 
 	fnr.node = node
 	debug.Log("Node size: %d", fnr.node.Size)
 
-	if (node.Type != restic.NodeTypeFile) && (node.Type != restic.NodeTypeDev) && (node.Type != restic.NodeTypeCharDev) {
+	if (node.Type != restic.NodeTypeFile) && (node.Type != restic.NodeTypeDev) {
 		_ = f.Close()
 		completeError(errors.Errorf("node type %q is wrong", node.Type))
 		return
@@ -214,7 +214,6 @@ func (s *fileSaver) saveFile(ctx context.Context, snPath string, target string, 
 
 	var sizeBytes int64
 	if node.Type != restic.NodeTypeDev {
-		// TODO: handle error
 		stat, err := f.Stat()
 		if err != nil {
 			_ = f.Close()
@@ -231,9 +230,7 @@ func (s *fileSaver) saveFile(ctx context.Context, snPath string, target string, 
 		}
 	}
 
-	debug.Log("SizeBytes: %v", sizeBytes)
 	offsetStart := int64(0)
-	offsetEnd := offsetStart + blockSize
 
 	go func() {
 		defer close(jobs)
@@ -242,9 +239,8 @@ func (s *fileSaver) saveFile(ctx context.Context, snPath string, target string, 
 			jobs <- processBlobJob{0, 0, 0}
 		} else {
 			for offsetStart < sizeBytes {
-				jobs <- processBlobJob{id, offsetStart, offsetEnd}
+				jobs <- processBlobJob{id, offsetStart, blockSize}
 				offsetStart += blockSize
-				offsetEnd = offsetStart + blockSize
 				id++
 			}
 		}
@@ -294,7 +290,7 @@ func (s *fileSaver) saveFile(ctx context.Context, snPath string, target string, 
 type processBlobJob struct {
 	id          int64
 	offsetStart int64
-	offsetEnd   int64
+	blockSize   int64
 }
 
 func (s *fileSaver) processBlobWorker(
@@ -322,15 +318,14 @@ func (s *fileSaver) processBlobWorker(
 				return nil
 			}
 		}
-		var pf io.Reader
-		if job.offsetStart == job.offsetEnd {
-			pf = f
+		var reader io.Reader
+		if job.blockSize == 0 {
+			// '0' indicates that we do not cut the file in parts
+			reader = f
 		} else {
-			debug.Log("Offset start: %d", job.offsetStart)
-			debug.Log("Offset end: %d", job.offsetEnd)
-			pf = io.NewSectionReader(f, job.offsetStart, job.offsetEnd-job.offsetStart)
+			reader = io.NewSectionReader(f, job.offsetStart, job.blockSize)
 		}
-		res, err := s.processBlobs(ctx, target, pf, lock, fnr, completeBlob, chnker, job.id, contentMap)
+		res, err := s.processBlobs(ctx, target, reader, lock, fnr, completeBlob, chnker, job.id, contentMap)
 		if err != nil {
 			return err
 		}
@@ -350,34 +345,28 @@ func (s *fileSaver) processBlobs(
 	contentMap map[int64][]restic.ID,
 ) (int, error) {
 
-	debug.Log("Processing blobs ...")
-
 	var chunksCount int
 	size := uint64(0)
 	chnker.Reset(f, s.pol)
+	lock.Lock()
 	contentMap[id] = make([]restic.ID, 0)
-	debug.Log("Node size: %d", fnr.node.Size)
+	lock.Unlock()
 
 	for {
 		buf := s.saveFilePool.Get()
-		debug.Log("Reading next chunk ...")
 		chunk, err := chnker.Next(buf.Data)
 		if err == io.EOF {
 			buf.Release()
 			break
 		}
-		debug.Log("Successfully read next chunk.")
 
 		if err != nil {
 			return 0, err
 		}
 
 		buf.Data = chunk.Data
-		debug.Log("Buffer data: %s", string(buf.Data))
-		debug.Log("Raw buffer data: %b", buf.Data)
 
 		size = uint64(chunk.Length)
-		debug.Log("Need to add size: %d", size)
 
 		// test if the context has been cancelled, return the error
 		if ctx.Err() != nil {
@@ -385,17 +374,15 @@ func (s *fileSaver) processBlobs(
 		}
 
 		// add a place to store the saveBlob result
+		// redefinition of pos on each iteration is needed as we pass it to saveBlob cb
 		pos := chunksCount
 
 		lock.Lock()
 		contentMap[id] = append(contentMap[id], restic.ID{})
 		fnr.node.Size += size
-		debug.Log("Node size: %d", fnr.node.Size)
 		lock.Unlock()
-		debug.Log("Scheduling to run saveBlob at %d", pos)
 
 		s.saveBlob(ctx, restic.DataBlob, buf, target, func(sbr saveBlobResponse) {
-			debug.Log("Running saveBlob at %d", pos)
 			lock.Lock()
 			if !sbr.known {
 				fnr.stats.DataBlobs++
@@ -404,7 +391,6 @@ func (s *fileSaver) processBlobs(
 			}
 
 			contentMap[id][pos] = sbr.id
-			debug.Log("Added size: %d", size)
 			lock.Unlock()
 
 			completeBlob(fnr.node)
