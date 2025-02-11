@@ -11,7 +11,6 @@ import (
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
 	"io"
-	"sort"
 	"sync"
 	"unsafe"
 )
@@ -140,7 +139,6 @@ func (s *fileSaver) saveFile(ctx context.Context, snPath string, target string, 
 		defer lock.Unlock()
 
 		remaining--
-		debug.Log("<<<<<<Remaining: %d", remaining)
 		if remaining == 0 && fnr.err == nil {
 			if isCompleted {
 				panic("completed twice")
@@ -151,16 +149,15 @@ func (s *fileSaver) saveFile(ctx context.Context, snPath string, target string, 
 				}
 			}
 			isCompleted = true
-			contentKeys := make([]int, 0, len(contentMap))
-			for key := range contentMap {
-				contentKeys = append(contentKeys, int(key))
-			}
-			sort.Ints(contentKeys)
 
-			node.Content = []restic.ID{}
-
-			for _, key := range contentKeys {
-				node.Content = append(node.Content, contentMap[int64(key)]...)
+			curIdx := 0
+			for {
+				contentValue, ok := contentMap[int64(curIdx)]
+				if !ok {
+					break
+				}
+				node.Content = append(node.Content, contentValue...)
+				curIdx++
 			}
 
 			finish(fnr)
