@@ -149,7 +149,7 @@ func init() {
 	f.BoolVar(&backupOptions.SkipIfUnchanged, "skip-if-unchanged", false, "skip snapshot creation if identical to parent snapshot")
 
 	f.BoolVar(&backupOptions.ReadSpecial, "read-special", false, "backup block devices and follow symlinks")
-	f.UintVar(&backupOptions.BlockSizeMB, "block-size-mb", 0, "per-file reading block size")
+	f.UintVar(&backupOptions.BlockSizeMB, "block-size", 0, "per-file reading block size")
 
 	// parse read concurrency from env, on error the default value will be used
 	readConcurrency, _ := strconv.ParseUint(os.Getenv("RESTIC_READ_CONCURRENCY"), 10, 32)

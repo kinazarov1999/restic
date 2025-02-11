@@ -482,12 +482,25 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 		return futureNode{}, true, nil
 	}
 
-	var openFlag int
+	openFlag := fs.O_NOFOLLOW
 	if arch.ReadSpecial {
-		openFlag = 0
-	} else {
-		openFlag = fs.O_NOFOLLOW
+		fileMode, err := arch.FS.Lstat(target)
+		if err != nil {
+			debug.Log("open metadata for %v returned error: %v", target, err)
+			return filterError(filterNotExist(err))
+		}
+		if fileMode.Mode&os.ModeSymlink != 0 {
+			targetFileMode, err := arch.FS.Stat(target)
+			if err != nil {
+				debug.Log("open metadata for %v returned error: %v", target, err)
+				return filterError(filterNotExist(err))
+			}
+			if isBlockDevice(targetFileMode) {
+				openFlag = 0
+			}
+		}
 	}
+
 	meta, err := arch.FS.OpenFile(target, openFlag, true)
 	if err != nil {
 		debug.Log("open metadata for %v returned error: %v", target, err)
@@ -521,7 +534,7 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 	}
 
 	switch {
-	case fi.Mode.IsRegular() || (arch.ReadSpecial && (fi.Mode&os.ModeDevice != 0)):
+	case fi.Mode.IsRegular() || (arch.ReadSpecial && isBlockDevice(fi)):
 		debug.Log("  %v regular file or device", target)
 
 		// check if the file has not changed before performing a fopen operation (more expensive, specially
@@ -571,7 +584,7 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 		}
 
 		// make sure it's still a file or a device
-		if !fi.Mode.IsRegular() && (!arch.ReadSpecial || (fi.Mode&os.ModeDevice == 0)) {
+		if !(fi.Mode.IsRegular() || (arch.ReadSpecial && isBlockDevice(fi))) {
 			err = errors.Errorf("file %q changed type, refusing to archive", target)
 			return filterError(err)
 		}
@@ -658,6 +671,10 @@ func fileChanged(fi *fs.ExtendedFileInfo, node *restic.Node, ignoreFlags uint) b
 	}
 
 	return false
+}
+
+func isBlockDevice(fi *fs.ExtendedFileInfo) bool {
+	return (fi.Mode&os.ModeDevice != 0) && (fi.Mode&os.ModeCharDevice == 0)
 }
 
 // join returns all elements separated with a forward slash.
