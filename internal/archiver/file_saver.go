@@ -150,6 +150,7 @@ func (s *fileSaver) saveFile(ctx context.Context, snPath string, target string, 
 			}
 			isCompleted = true
 
+			node.Content = []restic.ID{}
 			curIdx := 0
 			for {
 				contentValue, ok := contentMap[int64(curIdx)]
