@@ -122,7 +122,7 @@ type saveFileJob struct {
 }
 
 // saveFile stores the file f in the repo, then closes it.
-func (s *fileSaver) saveFile(ctx context.Context, snPath string, target string, f fs.File, start func(), finishReading func(), finish func(res futureNodeResult)) {
+func (s *fileSaver) saveFile(ctx context.Context, chnkers []*chunker.Chunker, snPath string, target string, f fs.File, start func(), finishReading func(), finish func(res futureNodeResult)) {
 	start()
 
 	fnr := futureNodeResult{
@@ -244,9 +244,9 @@ func (s *fileSaver) saveFile(ctx context.Context, snPath string, target string, 
 
 	go func() {
 		defer close(results)
-		for i := uint(0); i < s.perFileWorkers; i++ {
+		for _, chnker := range chnkers {
 			wg.Go(func() error {
-				return s.processBlobWorker(jobs, results, ctx, innerCtx, target, f, &lock, &fnr, completeBlob, contentMap)
+				return s.processBlobWorker(jobs, results, chnker, ctx, innerCtx, target, f, &lock, &fnr, completeBlob, contentMap)
 			})
 		}
 		wg.Wait()
@@ -290,6 +290,7 @@ type processBlobJob struct {
 func (s *fileSaver) processBlobWorker(
 	jobs <-chan processBlobJob,
 	results chan<- int,
+	chnker *chunker.Chunker,
 	ctx context.Context,
 	innerCtx context.Context,
 	target string,
@@ -299,7 +300,6 @@ func (s *fileSaver) processBlobWorker(
 	completeBlob func(node *restic.Node),
 	contentMap map[int][]restic.ID,
 ) error {
-	chnker := chunker.New(nil, s.pol)
 
 	for {
 		var job processBlobJob
@@ -319,11 +319,11 @@ func (s *fileSaver) processBlobWorker(
 		} else {
 			reader = io.NewSectionReader(f, int64(job.offsetStart), int64(job.blockSize))
 		}
-		res, err := s.processBlobs(ctx, target, reader, lock, fnr, completeBlob, chnker, job.id, contentMap)
+		chunksCount, err := s.processBlobs(ctx, target, reader, lock, fnr, completeBlob, chnker, job.id, contentMap)
 		if err != nil {
 			return err
 		}
-		results <- res
+		results <- chunksCount
 	}
 }
 
@@ -402,8 +402,12 @@ func (s *fileSaver) processBlobs(
 }
 
 func (s *fileSaver) worker(ctx context.Context, jobs <-chan saveFileJob) {
-	// a worker has one chunker which is reused for each file (because it contains a rather large buffer)
-	//chnker := chunker.New(nil, s.pol)
+	// each worker has a fixed amount of chunkers which are reused for each file (because they contain a rather large buffer)
+	chnkersAmount := int(s.perFileWorkers)
+	chnkers := make([]*chunker.Chunker, chnkersAmount)
+	for i := 0; i < chnkersAmount; i++ {
+		chnkers[i] = chunker.New(nil, s.pol)
+	}
 
 	for {
 		var job saveFileJob
@@ -417,7 +421,7 @@ func (s *fileSaver) worker(ctx context.Context, jobs <-chan saveFileJob) {
 			}
 		}
 
-		s.saveFile(ctx, job.snPath, job.target, job.file, job.start, func() {
+		s.saveFile(ctx, chnkers, job.snPath, job.target, job.file, job.start, func() {
 			if job.completeReading != nil {
 				job.completeReading()
 			}
