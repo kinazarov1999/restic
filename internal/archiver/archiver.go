@@ -68,7 +68,7 @@ func (s *ItemStats) Add(other ItemStats) {
 
 // ToNoder returns a restic.Node for a File.
 type ToNoder interface {
-	ToNode(ignoreXattrListError bool) (*restic.Node, error)
+	ToNode(ignoreXattrListError, readSpecial bool) (*restic.Node, error)
 }
 
 type archiverRepo interface {
@@ -131,6 +131,9 @@ type Archiver struct {
 
 	// Flags controlling change detection. See doc/040_backup.rst for details.
 	ChangeIgnoreFlags uint
+
+	// Read block and char devices as well as symlinks pointing to them
+	ReadSpecial bool
 }
 
 // Flags for the ChangeIgnoreFlags bitfield.
@@ -263,7 +266,7 @@ func (arch *Archiver) trackItem(item string, previous, current *restic.Node, s I
 
 // nodeFromFileInfo returns the restic node from an os.FileInfo.
 func (arch *Archiver) nodeFromFileInfo(snPath, filename string, meta ToNoder, ignoreXattrListError bool) (*restic.Node, error) {
-	node, err := meta.ToNode(ignoreXattrListError)
+	node, err := meta.ToNode(ignoreXattrListError, arch.ReadSpecial)
 	// node does not exist. This prevents all further processing for this file.
 	// If an error and a node are returned, then preserve as much data as possible (see below).
 	if err != nil && node == nil {
@@ -509,9 +512,38 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 		return futureNode{}, true, nil
 	}
 
+	if arch.ReadSpecial && (fi.Mode&os.ModeSymlink != 0) {
+		// follow the symlink and check the target file type
+		targetMeta, err := arch.FS.OpenFile(target, 0, true)
+		if err != nil {
+			debug.Log("open metadata for %v returned error: %v", target, err)
+			// ignore if file disappeared since it was returned by readdir
+			return filterError(filterNotExist(err))
+		}
+		targetFi, err := targetMeta.Stat()
+		if err != nil {
+			debug.Log("stat() for %v returned error: %v", target, err)
+			// ignore if file disappeared since it was returned by readdir
+			return filterError(filterNotExist(err))
+		}
+		if isBlockDevice(targetFi) {
+			err := meta.Close()
+			if err != nil {
+				return filterError(err)
+			}
+			meta = targetMeta
+			fi = targetFi
+		} else {
+			err := targetMeta.Close()
+			if err != nil {
+				return filterError(err)
+			}
+		}
+	}
+
 	switch {
-	case fi.Mode.IsRegular():
-		debug.Log("  %v regular file", target)
+	case fi.Mode.IsRegular() || (arch.ReadSpecial && isBlockDevice(fi)):
+		debug.Log("  %v regular file or device", target)
 
 		// check if the file has not changed before performing a fopen operation (more expensive, specially
 		// in network filesystems)
@@ -559,15 +591,15 @@ func (arch *Archiver) save(ctx context.Context, snPath, target string, previous 
 			return filterError(err)
 		}
 
-		// make sure it's still a file
-		if !fi.Mode.IsRegular() {
+		// make sure it's still a file or a device
+		if !(fi.Mode.IsRegular() || (arch.ReadSpecial && isBlockDevice(fi))) {
 			err = errors.Errorf("file %q changed type, refusing to archive", target)
 			return filterError(err)
 		}
 
+		// Save will close the file, we don't need to do that
 		closeFile = false
 
-		// Save will close the file, we don't need to do that
 		fn = arch.fileSaver.Save(ctx, snPath, target, meta, func() {
 			arch.StartFile(snPath)
 		}, func() {
@@ -647,6 +679,10 @@ func fileChanged(fi *fs.ExtendedFileInfo, node *restic.Node, ignoreFlags uint) b
 	}
 
 	return false
+}
+
+func isBlockDevice(fi *fs.ExtendedFileInfo) bool {
+	return (fi.Mode&os.ModeDevice != 0) && (fi.Mode&os.ModeCharDevice == 0)
 }
 
 // join returns all elements separated with a forward slash.
@@ -809,6 +845,8 @@ type SnapshotOptions struct {
 	ProgramVersion string
 	// SkipIfUnchanged omits the snapshot creation if it is identical to the parent snapshot.
 	SkipIfUnchanged bool
+
+	ReadSpecial bool
 }
 
 // loadParentTree loads a tree referenced by snapshot id. If id is null, nil is returned.
