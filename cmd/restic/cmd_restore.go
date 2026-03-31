@@ -63,7 +63,8 @@ Exit status is 12 if the password is incorrect.
 type RestoreOptions struct {
 	filter.ExcludePatternOptions
 	filter.IncludePatternOptions
-	Target string
+	Target     string
+	TargetFile string
 	data.SnapshotFilter
 	DryRun              bool
 	Sparse              bool
@@ -77,6 +78,7 @@ type RestoreOptions struct {
 
 func (opts *RestoreOptions) AddFlags(f *pflag.FlagSet) {
 	f.StringVarP(&opts.Target, "target", "t", "", "directory to extract data to")
+	f.StringVar(&opts.TargetFile, "target-file", "", "file to extract data to")
 
 	opts.ExcludePatternOptions.Add(f)
 	opts.IncludePatternOptions.Add(f)
@@ -125,8 +127,11 @@ func runRestore(ctx context.Context, opts RestoreOptions, gopts global.Options,
 		return errors.Fatalf("more than one snapshot ID specified: %v", args)
 	}
 
-	if opts.Target == "" {
+	if opts.Target == "" && opts.TargetFile == "" {
 		return errors.Fatal("please specify a directory to restore to (--target)")
+	}
+	if opts.Target != "" && opts.TargetFile != "" {
+		return errors.Fatal("only one of --target or --target-file can be specified")
 	}
 
 	if hasExcludes && hasIncludes {
@@ -170,6 +175,16 @@ func runRestore(ctx context.Context, opts RestoreOptions, gopts global.Options,
 		return err
 	}
 
+	var target string
+	var saveToFile bool
+	if opts.Target == "" {
+		target = opts.TargetFile
+		saveToFile = true
+	} else {
+		target = opts.Target
+		saveToFile = false
+	}
+
 	progress := restoreui.NewProgress(printer, ui.CalculateProgressInterval(!gopts.Quiet, gopts.JSON, term.CanUpdateStatus()))
 	res := restorer.NewRestorer(repo, sn, restorer.Options{
 		DryRun:          opts.DryRun,
@@ -178,6 +193,7 @@ func runRestore(ctx context.Context, opts RestoreOptions, gopts global.Options,
 		Overwrite:       opts.Overwrite,
 		Delete:          opts.Delete,
 		OwnershipByName: opts.OwnershipByName,
+		SaveToFile:      saveToFile,
 	})
 
 	totalErrors := 0
@@ -246,10 +262,13 @@ func runRestore(ctx context.Context, opts RestoreOptions, gopts global.Options,
 	}
 
 	if !gopts.JSON {
-		printer.P("restoring %s to %s\n", res.Snapshot(), opts.Target)
+		printer.P("restoring %s to %s\n", res.Snapshot(), target)
 	}
 
-	countRestoredFiles, err := res.RestoreTo(ctx, opts.Target)
+	debug.Log("restoring %s to %s\n", res.Snapshot(), target)
+	debug.Log("saveToFile is %t\n", saveToFile)
+
+	countRestoredFiles, err := res.RestoreTo(ctx, target)
 	if err != nil {
 		return err
 	}

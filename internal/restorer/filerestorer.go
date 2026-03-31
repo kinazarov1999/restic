@@ -64,6 +64,8 @@ type fileRestorer struct {
 	files []*fileInfo
 	Error func(string, error) error
 	Info  func(string)
+
+	SaveToFile bool
 }
 
 func newFileRestorer(dst string,
@@ -73,7 +75,8 @@ func newFileRestorer(dst string,
 	sparse bool,
 	allowRecursiveDelete bool,
 	startWarmup startWarmupFn,
-	progress *restore.Progress) *fileRestorer {
+	progress *restore.Progress,
+	saveToFile bool) *fileRestorer {
 
 	// as packs are streamed the concurrency is limited by IO
 	workerCount := int(connections)
@@ -91,6 +94,7 @@ func newFileRestorer(dst string,
 		dst:                  dst,
 		Error:                restorerAbortOnAllErrors,
 		Info:                 func(_ string) {},
+		SaveToFile:           saveToFile,
 	}
 }
 
@@ -127,6 +131,7 @@ func (r *fileRestorer) restoreFiles(ctx context.Context) error {
 	// Process packs in order of first access. While this cannot guarantee
 	// that file chunks are restored sequentially, it offers a good enough
 	// approximation to shorten restore times by up to 19% in some test.
+	debug.Log("r.files length: %d", len(r.files))
 	var packOrder restic.IDs
 
 	// create packInfo from fileInfo
@@ -144,6 +149,7 @@ func (r *fileRestorer) restoreFiles(ctx context.Context) error {
 		}
 		restoredBlobs := false
 		err := r.forEachBlob(fileBlobs, func(packID restic.ID, blob restic.Blob, idx int, fileOffset int64) {
+			//debug.Log("restoreFiles: processing blob %v for file %s", blob.ID, file.location)
 			if !file.state.HasMatchingBlob(idx) {
 				if largeFile {
 					packsMap[packID] = append(packsMap[packID], fileBlobInfo{id: blob.ID, offset: fileOffset})
@@ -152,6 +158,7 @@ func (r *fileRestorer) restoreFiles(ctx context.Context) error {
 			} else {
 				r.reportBlobProgress(file, uint64(blob.DataLength()))
 				// completely ignore blob
+				//debug.Log("restoreFiles: skipping matching blob %v for file %s", blob.ID, file.location)
 				return
 			}
 			pack, ok := packs[packID]
@@ -162,10 +169,12 @@ func (r *fileRestorer) restoreFiles(ctx context.Context) error {
 				}
 				packs[packID] = pack
 				packOrder = append(packOrder, packID)
+				//debug.Log("restoreFiles: creating new pack info for %v", packID)
 			}
 			pack.files[file] = struct{}{}
 			if blob.ID.Equal(r.zeroChunk) {
 				file.sparse = r.sparse
+				//debug.Log("restoreFiles: setting file %s as sparse due to zero chunk", file.location)
 			}
 		})
 		if err != nil {
@@ -342,13 +351,25 @@ func (r *fileRestorer) downloadBlobs(ctx context.Context, packID restic.ID,
 	blobs blobToFileOffsetsMapping, processedBlobs restic.BlobSet) error {
 
 	blobList := make([]restic.Blob, 0, len(blobs))
-	for _, entry := range blobs {
-		blobList = append(blobList, entry.blob)
+	for key, entry := range blobs {
+		debug.Log("key: %v, r.zeroChunk: %v", key, r.zeroChunk)
+		if r.SaveToFile || key != r.zeroChunk {
+			blobList = append(blobList, entry.blob)
+		}
 	}
 	return r.blobsLoader(ctx, packID, blobList,
 		func(h restic.BlobHandle, blobData []byte, err error) error {
 			processedBlobs.Insert(h)
 			blob := blobs[h.ID]
+			if h.ID == r.zeroChunk && r.SaveToFile {
+				for file, offsets := range blob.files {
+					for _, offset := range offsets {
+						offset += 0
+						r.reportBlobProgress(file, uint64(len(blobData)))
+					}
+				}
+				return nil
+			}
 			if err != nil {
 				for file := range blob.files {
 					if errFile := r.sanitizeError(file, err); errFile != nil {
@@ -378,9 +399,18 @@ func (r *fileRestorer) downloadBlobs(ctx context.Context, packID restic.ID,
 						} else {
 							defer file.lock.Unlock()
 							file.inProgress = true
-							createSize = file.size
+							if !r.SaveToFile {
+								createSize = file.size
+							}
 						}
-						writeErr := r.filesWriter.writeToFile(r.targetPath(file.location), blobData, offset, createSize, file.sparse)
+
+						var targetPath string
+						if r.SaveToFile {
+							targetPath = r.dst
+						} else {
+							targetPath = r.targetPath(file.location)
+						}
+						writeErr := r.filesWriter.writeToFile(targetPath, blobData, offset, createSize, file.sparse)
 						r.reportBlobProgress(file, uint64(len(blobData)))
 						return writeErr
 					}

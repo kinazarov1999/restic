@@ -1,7 +1,6 @@
 package restorer
 
 import (
-	"fmt"
 	"os"
 	"sync"
 	"syscall"
@@ -45,19 +44,19 @@ func newFilesWriter(count int, allowRecursiveDelete bool) *filesWriter {
 }
 
 func openFile(path string) (*os.File, error) {
-	f, err := fs.OpenFile(path, fs.O_WRONLY|fs.O_NOFOLLOW, 0600)
+	f, err := fs.OpenFile(path, fs.O_WRONLY, 0600)
 	if err != nil {
 		return nil, err
 	}
-	fi, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	if !fi.Mode().IsRegular() {
-		_ = f.Close()
-		return nil, fmt.Errorf("unexpected file type %v at %q", fi.Mode().Type(), path)
-	}
+	// fi, err := f.Stat()
+	// if err != nil {
+	// 	_ = f.Close()
+	// 	return nil, err
+	// }
+	// if !fi.Mode().IsRegular() {
+	// 	_ = f.Close()
+	// 	return nil, fmt.Errorf("unexpected file type %v at %q", fi.Mode().Type(), path)
+	// }
 	return f, nil
 }
 
@@ -163,6 +162,7 @@ func ensureSize(f *os.File, fi os.FileInfo, createSize int64, sparse bool) (*os.
 }
 
 func (w *filesWriter) writeToFile(path string, blob []byte, offset int64, createSize int64, sparse bool) error {
+	debug.Log("writeToFile %s at offset %d, length %d, createSize %d, sparse %v", path, offset, len(blob), createSize, sparse)
 	bucket := &w.buckets[uint(xxhash.Sum64String(path))%uint(len(w.buckets))]
 
 	acquireWriter := func() (*partialFile, error) {
@@ -180,8 +180,10 @@ func (w *filesWriter) writeToFile(path string, blob []byte, offset int64, create
 			if err != nil {
 				return nil, err
 			}
-		} else if f, err = openFile(path); err != nil {
-			return nil, err
+		} else {
+			if f, err = openFile(path); err != nil {
+				return nil, err
+			}
 		}
 
 		wr := &partialFile{File: f, users: 1, sparse: sparse}
