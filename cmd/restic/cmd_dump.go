@@ -61,14 +61,22 @@ Exit status is 12 if the password is incorrect.
 // DumpOptions collects all options for the dump command.
 type DumpOptions struct {
 	data.SnapshotFilter
-	Archive string
-	Target  string
+	Archive         string
+	Target          string
+	Shuffle         bool
+	RoundRobin      bool
+	separateLoaders bool
+	blockSizeMiB    uint
 }
 
 func (opts *DumpOptions) AddFlags(f *pflag.FlagSet) {
 	initSingleSnapshotFilter(f, &opts.SnapshotFilter)
 	f.StringVarP(&opts.Archive, "archive", "a", "tar", "set archive `format` as \"tar\" or \"zip\"")
 	f.StringVarP(&opts.Target, "target", "t", "", "write the output to target `path`")
+	f.BoolVar(&opts.Shuffle, "shuffle", false, "shuffle file order for parallel dumping")
+	f.BoolVar(&opts.RoundRobin, "round-robin", false, "use round-robin scheduling for parallel dumping")
+	f.BoolVar(&opts.separateLoaders, "separate-loaders", false, "load and write blobs in separate goroutines")
+	f.UintVar(&opts.blockSizeMiB, "block-size", 0, "backup by blocks of the specified size")
 }
 
 func splitPath(p string) []string {
@@ -80,7 +88,7 @@ func splitPath(p string) []string {
 	return append(s, f)
 }
 
-func printFromTree(ctx context.Context, tree *data.Tree, repo restic.BlobLoader, prefix string, pathComponents []string, d *dump.Dumper, canWriteArchiveFunc func() error) error {
+func printFromTree(ctx context.Context, tree *data.Tree, repo restic.BlobLoader, prefix string, pathComponents []string, n dump.NodeWriter, d dump.TreeDumper, canWriteArchiveFunc func() error) error {
 	// If we print / we need to assume that there are multiple nodes at that
 	// level in the tree.
 	if pathComponents[0] == "" {
@@ -102,13 +110,13 @@ func printFromTree(ctx context.Context, tree *data.Tree, repo restic.BlobLoader,
 		if node.Name == pathComponents[0] {
 			switch {
 			case l == 1 && node.Type == data.NodeTypeFile:
-				return d.WriteNode(ctx, node)
+				return n.WriteNode(ctx, node)
 			case l > 1 && node.Type == data.NodeTypeDir:
 				subtree, err := data.LoadTree(ctx, repo, *node.Subtree)
 				if err != nil {
 					return errors.Wrapf(err, "cannot load subtree for %q", item)
 				}
-				return printFromTree(ctx, subtree, repo, item, pathComponents[1:], d, canWriteArchiveFunc)
+				return printFromTree(ctx, subtree, repo, item, pathComponents[1:], n, d, canWriteArchiveFunc)
 			case node.Type == data.NodeTypeDir:
 				if err := canWriteArchiveFunc(); err != nil {
 					return err
@@ -180,9 +188,11 @@ func runDump(ctx context.Context, opts DumpOptions, gopts global.Options, args [
 
 	outputFileWriter := term.OutputRaw()
 	canWriteArchiveFunc := checkStdoutArchive(term)
+	var file *os.File
 
 	if opts.Target != "" {
-		file, err := os.Create(opts.Target)
+		var err error
+		file, err = os.Create(opts.Target)
 		if err != nil {
 			return fmt.Errorf("cannot dump to file: %w", err)
 		}
@@ -195,7 +205,15 @@ func runDump(ctx context.Context, opts DumpOptions, gopts global.Options, args [
 	}
 
 	d := dump.New(opts.Archive, repo, outputFileWriter)
-	err = printFromTree(ctx, tree, repo, "/", splittedPath, d, canWriteArchiveFunc)
+	var n dump.NodeWriter
+
+	if opts.Target != "" {
+		n = dump.NewParallelDumper(d, file, opts.Shuffle, opts.RoundRobin, opts.separateLoaders, opts.blockSizeMiB)
+	} else {
+		n = d
+	}
+
+	err = printFromTree(ctx, tree, repo, "/", splittedPath, n, d, canWriteArchiveFunc)
 	if err != nil {
 		return errors.Fatalf("cannot dump file: %v", err)
 	}
