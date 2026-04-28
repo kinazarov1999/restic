@@ -46,6 +46,7 @@ type Options struct {
 	Overwrite       OverwriteBehavior
 	Delete          bool
 	OwnershipByName bool
+	SaveToFile      bool
 }
 
 type OverwriteBehavior int
@@ -274,8 +275,10 @@ func (res *Restorer) traverseTreeInner(ctx context.Context, target, location str
 func (res *Restorer) restoreNodeTo(node *data.Node, target, location string) error {
 	if !res.opts.DryRun {
 		debug.Log("restoreNode %v %v %v", node.Name, target, location)
-		if err := fs.Remove(target); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return errors.Wrap(err, "RemoveNode")
+		if !res.opts.SaveToFile {
+			if err := fs.Remove(target); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return errors.Wrap(err, "RemoveNode")
+			}
 		}
 
 		err := fs.NodeCreateAt(node, target)
@@ -350,7 +353,7 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 		}
 	}
 
-	if !res.opts.DryRun {
+	if !res.opts.DryRun && !res.opts.SaveToFile {
 		// ensure that the target directory exists and is actually a directory
 		// Using ensureDir is too aggressive here as it also removes unexpected files
 		if err := fs.MkdirAll(dst, 0700); err != nil {
@@ -360,7 +363,7 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 
 	idx := NewHardlinkIndex[string]()
 	filerestorer := newFileRestorer(dst, res.repo.LoadBlobsFromPack, res.repo.LookupBlob,
-		res.repo.Connections(), res.opts.Sparse, res.opts.Delete, res.repo.StartWarmup, res.opts.Progress)
+		res.repo.Connections(), res.opts.Sparse, res.opts.Delete, res.repo.StartWarmup, res.opts.Progress, res.opts.SaveToFile)
 	filerestorer.Error = res.Error
 	filerestorer.Info = res.Info
 
@@ -375,13 +378,19 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 			if location != string(filepath.Separator) {
 				res.opts.Progress.AddFile(0)
 			}
-			return res.ensureDir(target)
+			if !res.opts.SaveToFile {
+				return res.ensureDir(target)
+			} else {
+				return nil
+			}
 		},
 
 		visitNode: func(node *data.Node, target, location string) error {
 			debug.Log("first pass, visitNode: mkdir %q, leaveDir on second pass should restore metadata", location)
-			if err := res.ensureDir(filepath.Dir(target)); err != nil {
-				return err
+			if !res.opts.SaveToFile {
+				if err := res.ensureDir(filepath.Dir(target)); err != nil {
+					return err
+				}
 			}
 
 			if node.Type != data.NodeTypeFile {
@@ -423,9 +432,13 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 			return err
 		},
 	})
+
 	if err != nil {
 		return 0, err
 	}
+	//if saveToFile && len(filerestorer.files) != 1 {
+	//	return 0, errors.New("expected exactly one file when saveToFile is true")
+	//}
 
 	if !res.opts.DryRun {
 		err = filerestorer.restoreFiles(ctx)
@@ -437,47 +450,49 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) (uint64, error) 
 	debug.Log("second pass for %q", dst)
 
 	// second tree pass: restore special files and filesystem metadata
-	err = res.traverseTree(ctx, dst, *res.sn.Tree, treeVisitor{
-		visitNode: func(node *data.Node, target, location string) error {
-			debug.Log("second pass, visitNode: restore node %q", location)
-			if node.Type != data.NodeTypeFile {
-				_, err := res.withOverwriteCheck(ctx, node, target, location, false, nil, func(_ bool, _ *fileState) error {
-					return res.restoreNodeTo(node, target, location)
-				})
-				return err
-			}
-
-			if idx.Has(node.Inode, node.DeviceID) && idx.Value(node.Inode, node.DeviceID) != location {
-				_, err := res.withOverwriteCheck(ctx, node, target, location, true, nil, func(_ bool, _ *fileState) error {
-					return res.restoreHardlinkAt(node, filerestorer.targetPath(idx.Value(node.Inode, node.DeviceID)), target, location)
-				})
-				return err
-			}
-
-			if _, ok := res.hasRestoredFile(location); ok {
-				return res.restoreNodeMetadataTo(node, target, location)
-			}
-			// don't touch skipped files
-			return nil
-		},
-		leaveDir: func(node *data.Node, target, location string, expectedFilenames []string) error {
-			if res.opts.Delete {
-				if err := res.removeUnexpectedFiles(ctx, target, location, expectedFilenames); err != nil {
+	if !res.opts.SaveToFile {
+		err = res.traverseTree(ctx, dst, *res.sn.Tree, treeVisitor{
+			visitNode: func(node *data.Node, target, location string) error {
+				debug.Log("second pass, visitNode: restore node %q", location)
+				if node.Type != data.NodeTypeFile {
+					_, err := res.withOverwriteCheck(ctx, node, target, location, false, nil, func(_ bool, _ *fileState) error {
+						return res.restoreNodeTo(node, target, location)
+					})
 					return err
 				}
-			}
 
-			if node == nil {
+				if idx.Has(node.Inode, node.DeviceID) && idx.Value(node.Inode, node.DeviceID) != location {
+					_, err := res.withOverwriteCheck(ctx, node, target, location, true, nil, func(_ bool, _ *fileState) error {
+						return res.restoreHardlinkAt(node, filerestorer.targetPath(idx.Value(node.Inode, node.DeviceID)), target, location)
+					})
+					return err
+				}
+
+				if _, ok := res.hasRestoredFile(location); ok {
+					return res.restoreNodeMetadataTo(node, target, location)
+				}
+				// don't touch skipped files
 				return nil
-			}
+			},
+			leaveDir: func(node *data.Node, target, location string, expectedFilenames []string) error {
+				if res.opts.Delete {
+					if err := res.removeUnexpectedFiles(ctx, target, location, expectedFilenames); err != nil {
+						return err
+					}
+				}
 
-			err := res.restoreNodeMetadataTo(node, target, location)
-			if err == nil {
-				res.opts.Progress.AddProgress(location, restoreui.ActionDirRestored, 0, 0)
-			}
-			return err
-		},
-	})
+				if node == nil {
+					return nil
+				}
+
+				err := res.restoreNodeMetadataTo(node, target, location)
+				if err == nil {
+					res.opts.Progress.AddProgress(location, restoreui.ActionDirRestored, 0, 0)
+				}
+				return err
+			},
+		})
+	}
 	return restoredFileCount, err
 }
 
