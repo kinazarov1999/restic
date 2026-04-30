@@ -85,7 +85,7 @@ func WriteTest(t *testing.T, format string, cd CheckDump) {
 			rtest.OK(t, err)
 
 			dst := &bytes.Buffer{}
-			d := New(format, repo, dst)
+			d := NewSequentialDumper(format, repo, dst)
 			if err := d.DumpTree(ctx, tree, tt.target); err != nil {
 				t.Fatalf("Dumper.Run error = %v", err)
 			}

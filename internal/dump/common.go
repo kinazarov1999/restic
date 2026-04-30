@@ -2,6 +2,7 @@ package dump
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"path"
 
@@ -13,23 +14,41 @@ import (
 
 // A Dumper writes trees and files from a repository to a Writer
 // in an archive format.
-type Dumper struct {
+type Dumper interface {
+	WriteNode(ctx context.Context, node *restic.Node) error
+	DumpTree(ctx context.Context, tree *restic.Tree, rootPath string) error
+}
+
+// SequentialDumper writes trees and files sequentially.
+type SequentialDumper struct {
 	cache  *bloblru.Cache
 	format string
 	repo   restic.Loader
-	w      io.Writer
+	writer io.Writer
 }
 
-func New(format string, repo restic.Loader, w io.Writer) *Dumper {
-	return &Dumper{
+type ParallelDumper struct {
+	seq      *SequentialDumper
+	writerAt io.WriterAt
+}
+
+func NewSequentialDumper(format string, repo restic.Loader, writer io.Writer) *SequentialDumper {
+	return &SequentialDumper{
 		cache:  bloblru.New(64 << 20),
 		format: format,
 		repo:   repo,
-		w:      w,
+		writer: writer,
 	}
 }
 
-func (d *Dumper) DumpTree(ctx context.Context, tree *restic.Tree, rootPath string) error {
+func NewParallelDumper(seq *SequentialDumper, writerAt io.WriterAt) *ParallelDumper {
+	return &ParallelDumper{
+		seq:      seq,
+		writerAt: writerAt,
+	}
+}
+
+func (d *SequentialDumper) DumpTree(ctx context.Context, tree *restic.Tree, rootPath string) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -98,11 +117,11 @@ func sendNodes(ctx context.Context, repo restic.BlobLoader, root *restic.Node, c
 
 // WriteNode writes a file node's contents directly to d's Writer,
 // without caring about d's format.
-func (d *Dumper) WriteNode(ctx context.Context, node *restic.Node) error {
-	return d.writeNode(ctx, d.w, node)
+func (d *SequentialDumper) WriteNode(ctx context.Context, node *restic.Node) error {
+	return d.writeNode(ctx, d.writer, node)
 }
 
-func (d *Dumper) writeNode(ctx context.Context, w io.Writer, node *restic.Node) error {
+func (d *SequentialDumper) writeNode(ctx context.Context, w io.Writer, node *restic.Node) error {
 	wg, ctx := errgroup.WithContext(ctx)
 	limit := d.repo.Connections() - 1 // See below for the -1.
 	blobs := make(chan (<-chan []byte), limit)
@@ -148,5 +167,70 @@ loop:
 	}
 
 	close(blobs)
+	return wg.Wait()
+}
+
+func (p *ParallelDumper) WriteNode(ctx context.Context, node *restic.Node) error {
+	return p.writeNode(ctx, p.writerAt, node)
+}
+
+func (p *ParallelDumper) DumpTree(ctx context.Context, tree *restic.Tree, rootPath string) error {
+	return p.seq.DumpTree(ctx, tree, rootPath)
+}
+
+type BlobTask struct {
+	id     restic.ID
+	offset int64
+}
+
+func (p *ParallelDumper) writeNode(ctx context.Context, w io.WriterAt, node *restic.Node) error {
+	wg, ctx := errgroup.WithContext(ctx)
+	limit := int(p.seq.repo.Connections())
+	wg.SetLimit(limit)
+
+	taskChan := make(chan BlobTask, limit*2)
+
+	for i := 0; i < limit; i++ {
+		wg.Go(func() error {
+			for task := range taskChan {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				default:
+					blob, err := p.seq.cache.GetOrCompute(task.id, func() ([]byte, error) {
+						return p.seq.repo.LoadBlob(ctx, restic.DataBlob, task.id, nil)
+					})
+					if err != nil {
+						return err
+					}
+					if _, err := w.WriteAt(blob, task.offset); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		})
+	}
+
+	var currentOffset int64 = 0
+	for _, id := range node.Content {
+		size, found := p.seq.repo.LookupBlobSize(restic.DataBlob, id)
+		if !found {
+			return fmt.Errorf("blob %v not found", id)
+		}
+
+		select {
+		case taskChan <- BlobTask{
+			id:     id,
+			offset: currentOffset,
+		}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+
+		currentOffset += int64(size)
+	}
+	close(taskChan)
+
 	return wg.Wait()
 }

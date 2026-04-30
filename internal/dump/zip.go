@@ -9,8 +9,8 @@ import (
 	"github.com/restic/restic/internal/restic"
 )
 
-func (d *Dumper) dumpZip(ctx context.Context, ch <-chan *restic.Node) (err error) {
-	w := zip.NewWriter(d.w)
+func (d *SequentialDumper) dumpZip(ctx context.Context, ch <-chan *restic.Node) (err error) {
+	w := zip.NewWriter(d.writer)
 
 	defer func() {
 		if err == nil {
@@ -27,7 +27,7 @@ func (d *Dumper) dumpZip(ctx context.Context, ch <-chan *restic.Node) (err error
 	return nil
 }
 
-func (d *Dumper) dumpNodeZip(ctx context.Context, node *restic.Node, zw *zip.Writer) error {
+func (d *SequentialDumper) dumpNodeZip(ctx context.Context, node *restic.Node, zw *zip.Writer) error {
 	relPath, err := filepath.Rel("/", node.Path)
 	if err != nil {
 		return err
