@@ -11,6 +11,9 @@ import (
 	"github.com/restic/restic/internal/dump"
 	"github.com/restic/restic/internal/errors"
 	"github.com/restic/restic/internal/restic"
+	dumpui "github.com/restic/restic/internal/ui/dump"
+	"github.com/restic/restic/internal/ui/progress"
+	"github.com/restic/restic/internal/ui/termstatus"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -46,7 +49,9 @@ Exit status is 12 if the password is incorrect.
 		GroupID:           cmdGroupDefault,
 		DisableAutoGenTag: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDump(cmd.Context(), opts, globalOptions, args)
+			term, cancel := setupTermstatus()
+			defer cancel()
+			return runDump(cmd.Context(), opts, globalOptions, term, args)
 		},
 	}
 
@@ -126,7 +131,7 @@ func printFromTree(ctx context.Context, tree *restic.Tree, repo restic.BlobLoade
 	return fmt.Errorf("path %q not found in snapshot", item)
 }
 
-func runDump(ctx context.Context, opts DumpOptions, gopts GlobalOptions, args []string) error {
+func runDump(ctx context.Context, opts DumpOptions, gopts GlobalOptions, term *termstatus.Terminal, args []string) error {
 	if len(args) != 2 {
 		return errors.Fatal("both file and snapshot ID must be specified")
 	}
@@ -202,7 +207,16 @@ func runDump(ctx context.Context, opts DumpOptions, gopts GlobalOptions, args []
 	var dumper dump.Dumper = seq
 
 	if opts.Target != "" {
-		dumper = dump.NewParallelDumper(seq, file, opts.SkipZeros)
+		var progressBar *progress.Counter
+		if gopts.JSON {
+			printer := dumpui.NewJSONProgress(term)
+			interval := calculateProgressInterval(!gopts.Quiet, true)
+			progressBar = progress.NewCounter(interval, 0, printer.Update)
+		}
+		dumper = dump.NewParallelDumper(seq, file, opts.SkipZeros, progressBar)
+		if progressBar != nil {
+			defer progressBar.Done()
+		}
 	}
 
 	err = printFromTree(ctx, tree, repo, "/", splittedPath, dumper, canWriteArchiveFunc)

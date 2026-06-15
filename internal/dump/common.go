@@ -9,6 +9,7 @@ import (
 	"github.com/restic/restic/internal/bloblru"
 	"github.com/restic/restic/internal/repository"
 	"github.com/restic/restic/internal/restic"
+	"github.com/restic/restic/internal/ui/progress"
 	"github.com/restic/restic/internal/walker"
 	"golang.org/x/sync/errgroup"
 )
@@ -32,6 +33,7 @@ type ParallelDumper struct {
 	seq       *SequentialDumper
 	writerAt  io.WriterAt
 	skipZeros bool
+	progress  *progress.Counter
 }
 
 func NewSequentialDumper(format string, repo restic.Loader, writer io.Writer) *SequentialDumper {
@@ -43,11 +45,12 @@ func NewSequentialDumper(format string, repo restic.Loader, writer io.Writer) *S
 	}
 }
 
-func NewParallelDumper(seq *SequentialDumper, writerAt io.WriterAt, skipZeros bool) *ParallelDumper {
+func NewParallelDumper(seq *SequentialDumper, writerAt io.WriterAt, skipZeros bool, progress *progress.Counter) *ParallelDumper {
 	return &ParallelDumper{
 		seq:       seq,
 		writerAt:  writerAt,
 		skipZeros: skipZeros,
+		progress:  progress,
 	}
 }
 
@@ -191,6 +194,10 @@ func (p *ParallelDumper) writeNode(ctx context.Context, w io.WriterAt, node *res
 	limit := int(p.seq.repo.Connections())
 	wg.SetLimit(limit)
 
+	if p.progress != nil {
+		p.progress.SetMax(node.Size)
+	}
+
 	taskChan := make(chan BlobTask, limit*2)
 
 	for i := 0; i < limit; i++ {
@@ -209,6 +216,9 @@ func (p *ParallelDumper) writeNode(ctx context.Context, w io.WriterAt, node *res
 					if _, err := w.WriteAt(blob, task.offset); err != nil {
 						return err
 					}
+					if p.progress != nil {
+						p.progress.Add(uint64(len(blob)))
+					}
 				}
 			}
 			return nil
@@ -222,6 +232,9 @@ func (p *ParallelDumper) writeNode(ctx context.Context, w io.WriterAt, node *res
 			return fmt.Errorf("blob %v not found", id)
 		}
 		if p.skipZeros && (id == repository.ZeroChunk()) {
+			if p.progress != nil {
+				p.progress.Add(uint64(size))
+			}
 			currentOffset += int64(size)
 			continue
 		}
