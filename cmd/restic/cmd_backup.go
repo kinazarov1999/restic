@@ -98,6 +98,7 @@ type BackupOptions struct {
 	WithAtime         bool
 	IgnoreInode       bool
 	IgnoreCtime       bool
+	Path              string
 	UseFsSnapshot     bool
 	DryRun            bool
 	ReadConcurrency   uint
@@ -148,6 +149,7 @@ func (opts *BackupOptions) AddFlags(f *pflag.FlagSet) {
 	if runtime.GOOS == "linux" {
 		f.BoolVar(&opts.ReadSpecial, "read-special", false, "backup block devices as well as follow symlinks pointing to block devices")
 	}
+	f.StringVar(&opts.Path, "path", "", "use a different `path` in the snapshot (only valid with a single source path)")
 	f.UintVar(&opts.BlockSizeGiB, "block-size", 0, "per-file reading block size in GiB")
 
 	// parse read concurrency from env, on error the default value will be used
@@ -307,6 +309,10 @@ func (opts BackupOptions) Check(gopts GlobalOptions, args []string) error {
 		}
 	}
 
+	if opts.Path != "" && !filepath.IsAbs(opts.Path) {
+		return errors.Fatalf("--path must be an absolute path, got %q", opts.Path)
+	}
+
 	return nil
 }
 
@@ -458,6 +464,10 @@ func collectTargets(opts BackupOptions, args []string) (targets []string, err er
 func findParentSnapshot(ctx context.Context, repo restic.ListerLoaderUnpacked, opts BackupOptions, targets []string, timeStampLimit time.Time) (*restic.Snapshot, error) {
 	if opts.Force {
 		return nil, nil
+	}
+
+	if opts.Path != "" {
+		targets = []string{opts.Path}
 	}
 
 	snName := opts.Parent
@@ -678,6 +688,12 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts GlobalOptions, ter
 		ParentSnapshot:  parentSnapshot,
 		ProgramVersion:  "restic " + version,
 		SkipIfUnchanged: opts.SkipIfUnchanged,
+	}
+	if opts.Path != "" {
+		if len(targets) != 1 {
+			return errors.Fatal("--path can only be used with a single backup source path")
+		}
+		snapshotOpts.SnapshotPath = opts.Path
 	}
 
 	if !gopts.JSON {

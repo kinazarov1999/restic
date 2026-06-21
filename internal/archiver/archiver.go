@@ -852,6 +852,8 @@ type SnapshotOptions struct {
 	SkipIfUnchanged bool
 
 	ReadSpecial bool
+	// SnapshotPath overrides the paths stored in the snapshot metadata.
+	SnapshotPath string
 }
 
 // loadParentTree loads a tree referenced by snapshot id. If id is null, nil is returned.
@@ -975,7 +977,11 @@ func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts Snaps
 		}
 	}
 
-	sn, err := restic.NewSnapshot(targets, opts.Tags, opts.Hostname, opts.Time)
+	snapshotTargets := targets
+	if opts.SnapshotPath != "" {
+		snapshotTargets = []string{opts.SnapshotPath}
+	}
+	sn, err := restic.NewSnapshot(snapshotTargets, opts.Tags, opts.Hostname, opts.Time)
 	if err != nil {
 		return nil, restic.ID{}, nil, err
 	}
